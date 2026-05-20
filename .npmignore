@@ -1,0 +1,9 @@
+*.test.*
+*.spec.*
+cartographer-*.test.*
+cartographer-agent-sim.*
+cartographer-killchain-run.*
+**/*.test.*
+**/*.spec.*
+src/tests/
+tests/

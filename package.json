@@ -1,0 +1,72 @@
+{
+  "name": "@joecwales/cartographer-mcp",
+  "version": "0.1.0",
+  "mcpName": "io.github.joecwales/cartographer-mcp",
+  "description": "Deterministic, rule-tiered capability oracle and MCP server for high-density A-MEM agent workflows.",
+  "type": "module",
+  "main": "./dist/cartographer-mcp.js",
+  "types": "./dist/cartographer-mcp.d.ts",
+  "files": [
+    "dist/cartographer-cli.js",
+    "dist/cartographer-cli.d.ts",
+    "dist/cartographer-mcp.js",
+    "dist/cartographer-mcp.d.ts",
+    "dist/cartographer-watcher.js",
+    "dist/cartographer-watcher.d.ts",
+    "dist/cartographer-parser.js",
+    "dist/cartographer-parser.d.ts",
+    "dist/cartographer-store.js",
+    "dist/cartographer-store.d.ts",
+    "dist/cartographer-ai-pass.js",
+    "dist/cartographer-ai-pass.d.ts",
+    "dist/cartographer-chunk-policy.js",
+    "dist/cartographer-chunk-policy.d.ts",
+    "dist/cartographer-types.js",
+    "dist/cartographer-types.d.ts",
+    "dist/cartographer-db-init.js",
+    "dist/cartographer-db-init.d.ts",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
+  "bin": {
+    "cartographer": "dist/cartographer-cli.js",
+    "cartographer-mcp": "dist/cartographer-mcp.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/cartographer-cli.js dist/cartographer-mcp.js",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node -e \"console.log('✅ Cartographer MCP installed. Run: cartographer --help')\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joecwales/cartographer-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "agent",
+    "ast",
+    "vector",
+    "sqlite-vec",
+    "capability"
+  ],
+  "author": "NODE OUT",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "better-sqlite3": "12.10.0",
+    "chokidar": "5.0.0",
+    "sqlite-vec": "0.1.6",
+    "zod": "^3.23.8",
+    "p-limit": "^6.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

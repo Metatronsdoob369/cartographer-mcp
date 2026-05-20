@@ -1,0 +1,15 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.joecwales/cartographer-mcp",
+  "title": "Cartographer MCP - Deterministic Capability Oracle",
+  "description": "Rule-tiered AST + sqlite-vec capability search with trust/density/import gates for sub-4KB zero-external A-MEM payloads.",
+  "version": "0.1.0",
+  "packages": [{
+    "registryType": "npm",
+    "identifier": "@joecwales/cartographer-mcp",
+    "version": "0.1.0",
+    "transport": { "type": "stdio" }
+  }],
+  "tools": ["search_capability", "map_dependencies", "evaluate_redundancy", "set_policy_profile", "reindex"],
+  "capabilities": ["local-only", "vector-search", "policy-gates", "incremental-index", "ast-parsing"]
+}
