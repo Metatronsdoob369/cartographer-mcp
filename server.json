@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Metatronsdoob369.cartographer-mcp",
+  "name": "io.github.Metatronsdoob369/cartographer-mcp",
   "title": "Cartographer MCP",
   "description": "Rule-tiered AST and sqlite-vec capability oracle for A-MEM agent workflows.",
   "version": "0.1.0",
