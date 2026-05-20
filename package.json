@@ -1,6 +1,6 @@
 {
   "name": "@joecwales/cartographer-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.Metatronsdoob369/cartographer-mcp",
   "description": "Deterministic, rule-tiered capability oracle and MCP server for high-density A-MEM agent workflows.",
   "type": "module",
@@ -35,6 +35,7 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cartographer-cli.js dist/cartographer-mcp.js",
+    "postbuild": "node -e \"for(const f of ['dist/cartographer-cli.js','dist/cartographer-mcp.js']){let c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)}\"",
     "prepublishOnly": "npm run build",
     "postinstall": "node -e \"console.log('✅ Cartographer MCP installed. Run: cartographer --help')\""
   },
