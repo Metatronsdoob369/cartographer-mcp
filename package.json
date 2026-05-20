@@ -1,7 +1,7 @@
 {
   "name": "@joecwales/cartographer-mcp",
   "version": "0.1.0",
-  "mcpName": "io.github.joecwales/cartographer-mcp",
+  "mcpName": "io.github.metatronsdoob369/cartographer-mcp",
   "description": "Deterministic, rule-tiered capability oracle and MCP server for high-density A-MEM agent workflows.",
   "type": "module",
   "main": "./dist/cartographer-mcp.js",
@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joecwales/cartographer-mcp.git"
+    "url": "git+https://github.com/Metatronsdoob369/cartographer-mcp.git"
   },
   "keywords": [
     "mcp",
