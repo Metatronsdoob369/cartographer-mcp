@@ -3,11 +3,11 @@
   "name": "io.github.Metatronsdoob369/cartographer-mcp",
   "title": "Cartographer MCP",
   "description": "Rule-tiered AST and sqlite-vec capability oracle for A-MEM agent workflows.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "packages": [{
     "registryType": "npm",
     "identifier": "@joecwales/cartographer-mcp",
-    "version": "0.1.0",
+    "version": "0.1.2",
     "transport": { "type": "stdio" }
   }],
   "tools": ["search_capability", "map_dependencies", "evaluate_redundancy", "set_policy_profile", "reindex"]
