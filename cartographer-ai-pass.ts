@@ -6,6 +6,10 @@ type AIPassConfig = {
   summaryModel: string;
   summaryApiKey?: string;
   summaryTimeoutMs: number;
+  summaryMaxInputChars: number;
+  summaryMaxRetries: number;
+  summaryBackoffMs: number;
+  summaryFailureThreshold: number;
   embeddingEndpoint: string;
   embeddingModel: string;
   embeddingTimeoutMs: number;
@@ -24,6 +28,69 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     }, ms);
   });
   return Promise.race([promise, timeout]);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(raw: string | null): number | null {
+  if (!raw) return null;
+
+  const asInt = Number.parseInt(raw, 10);
+  if (Number.isFinite(asInt) && asInt > 0) {
+    return asInt * 1000;
+  }
+
+  const at = Date.parse(raw);
+  if (Number.isFinite(at)) {
+    const delta = at - Date.now();
+    return delta > 0 ? delta : null;
+  }
+
+  return null;
+}
+
+function jitteredBackoffMs(baseMs: number, attempt: number): number {
+  const exp = baseMs * Math.pow(2, attempt);
+  const jitter = Math.floor(Math.random() * Math.max(100, Math.floor(baseMs / 2)));
+  return Math.min(exp + jitter, 30_000);
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+type SummaryEndpointError = Error & {
+  status?: number;
+  retryAfterMs?: number | null;
+  headers?: Record<string, string>;
+};
+
+function collectRateLimitHeaders(response: Response): Record<string, string> {
+  const keys = [
+    "retry-after",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+  ];
+
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const v = response.headers.get(k);
+    if (v) out[k] = v;
+  }
+
+  for (const [k, v] of response.headers.entries()) {
+    const lower = k.toLowerCase();
+    if ((lower.startsWith("x-xai-") || lower.includes("ratelimit")) && !(lower in out)) {
+      out[lower] = v;
+    }
+  }
+
+  return out;
 }
 
 function normalizeSummary(raw: string): string {
@@ -121,7 +188,7 @@ async function callSummaryEndpoint(config: AIPassConfig, input: {
     max_tokens: 80,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `Analyze this ${input.chunkKind}:\n\n${input.code}` },
+      { role: "user", content: `Analyze this ${input.chunkKind}:\n\n${input.code.slice(0, config.summaryMaxInputChars)}` },
     ],
   };
 
@@ -135,7 +202,11 @@ async function callSummaryEndpoint(config: AIPassConfig, input: {
   );
 
   if (!response.ok) {
-    throw new Error(`summary endpoint returned ${response.status}`);
+    const err: SummaryEndpointError = new Error(`summary endpoint returned ${response.status}`);
+    err.status = response.status;
+    err.retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+    err.headers = collectRateLimitHeaders(response);
+    throw err;
   }
 
   const json = (await response.json()) as unknown;
@@ -198,6 +269,10 @@ export function createCapabilityAIPass(userConfig?: Partial<AIPassConfig>): Capa
     summaryModel: userConfig?.summaryModel ?? process.env.CARTO_SUMMARY_MODEL ?? "grok-4-fast",
     summaryApiKey: userConfig?.summaryApiKey ?? process.env.CARTO_SUMMARY_API_KEY ?? process.env.XAI_API_KEY,
     summaryTimeoutMs: userConfig?.summaryTimeoutMs ?? Number(process.env.CARTO_SUMMARY_TIMEOUT_MS ?? 12000),
+    summaryMaxInputChars: userConfig?.summaryMaxInputChars ?? Number(process.env.CARTO_SUMMARY_MAX_INPUT_CHARS ?? 2048),
+    summaryMaxRetries: userConfig?.summaryMaxRetries ?? Number(process.env.CARTO_SUMMARY_MAX_RETRIES ?? 2),
+    summaryBackoffMs: userConfig?.summaryBackoffMs ?? Number(process.env.CARTO_SUMMARY_BACKOFF_MS ?? 500),
+    summaryFailureThreshold: userConfig?.summaryFailureThreshold ?? Number(process.env.CARTO_SUMMARY_FAILURE_THRESHOLD ?? 3),
     embeddingEndpoint:
       userConfig?.embeddingEndpoint ?? process.env.CARTO_EMBED_ENDPOINT ?? "http://127.0.0.1:11434/api/embed",
     embeddingModel: userConfig?.embeddingModel ?? process.env.CARTO_EMBED_MODEL ?? "nomic-embed-text",
@@ -208,6 +283,7 @@ export function createCapabilityAIPass(userConfig?: Partial<AIPassConfig>): Capa
 
   let summaryCircuitOpenUntil = 0;
   let embedCircuitOpenUntil = 0;
+  let consecutiveSummaryFailures = 0;
 
   return {
     async summarize(input: {
@@ -221,16 +297,49 @@ export function createCapabilityAIPass(userConfig?: Partial<AIPassConfig>): Capa
         return fallbackSummary(input.chunkKind, input.symbolName);
       }
 
-      try {
-        const summary = await callSummaryEndpoint(config, {
-          chunkKind: input.chunkKind,
-          code: input.code,
-        });
-        return summary || fallbackSummary(input.chunkKind, input.symbolName);
-      } catch {
-        summaryCircuitOpenUntil = Date.now() + config.circuitCooldownMs;
-        return fallbackSummary(input.chunkKind, input.symbolName);
+      for (let attempt = 0; attempt <= config.summaryMaxRetries; attempt++) {
+        try {
+          const summary = await callSummaryEndpoint(config, {
+            chunkKind: input.chunkKind,
+            code: input.code,
+          });
+          consecutiveSummaryFailures = 0;
+          return summary || fallbackSummary(input.chunkKind, input.symbolName);
+        } catch (rawErr) {
+          const err = rawErr as SummaryEndpointError;
+          const status = err.status;
+          const isChunkError = status === 400 || status === 422;
+          const isRetryable = status === undefined || (typeof status === "number" && isRetryableStatus(status));
+
+          if (isChunkError) {
+            process.stderr.write(`[ai-pass] chunk rejected (${status}), skipping: ${input.filePath}\n`);
+            return fallbackSummary(input.chunkKind, input.symbolName);
+          }
+
+          const canRetry = isRetryable && attempt < config.summaryMaxRetries;
+          if (canRetry) {
+            const waitMs = err.retryAfterMs ?? jitteredBackoffMs(config.summaryBackoffMs, attempt);
+            const headerInfo = err.headers ? ` headers=${JSON.stringify(err.headers)}` : "";
+            process.stderr.write(
+              `[ai-pass] transient summary error${status ? ` (${status})` : ""}; retry ${attempt + 1}/${config.summaryMaxRetries} in ${waitMs}ms${headerInfo}\n`
+            );
+            await sleep(waitMs);
+            continue;
+          }
+
+          consecutiveSummaryFailures += 1;
+          if (consecutiveSummaryFailures >= config.summaryFailureThreshold) {
+            summaryCircuitOpenUntil = Date.now() + config.circuitCooldownMs;
+            process.stderr.write(`[ai-pass] systemic summary failures=${consecutiveSummaryFailures}; opening circuit for ${config.circuitCooldownMs}ms\n`);
+          } else {
+            process.stderr.write(`[ai-pass] systemic summary error (failure ${consecutiveSummaryFailures}/${config.summaryFailureThreshold}): ${err}\n`);
+          }
+
+          return fallbackSummary(input.chunkKind, input.symbolName);
+        }
       }
+
+      return fallbackSummary(input.chunkKind, input.symbolName);
     },
 
     async embed(summary: string) {

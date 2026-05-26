@@ -93,12 +93,93 @@ function walkFiles(root: string, maxFiles: number): string[] {
   return out;
 }
 
+function isLikelyTextChunk(code: string): boolean {
+  if (!code || code.length === 0) return false;
+  const sample = code.slice(0, 1000);
+  if (sample.length === 0) return false;
+  if (sample.includes("\u0000")) return false;
+
+  let nonPrintable = 0;
+  for (const ch of sample) {
+    const cp = ch.charCodeAt(0);
+    const isControl = cp < 32 && ch !== "\n" && ch !== "\r" && ch !== "\t";
+    const replacementChar = cp === 65533;
+    if (isControl || replacementChar) nonPrintable += 1;
+  }
+
+  return nonPrintable / sample.length < 0.05;
+}
+
+async function runBackfill(args: string[]) {
+  // Targets only fallback chunks in DB — no file walk, no reindex churn.
+  const dbPath = parseFlag(args, "--db") ?? DEFAULT_DB_PATH;
+  const CONCURRENCY = Number(process.env.CARTO_CONCURRENCY ?? 20);
+  const db = initCartographerDb({ dbPath, embeddingDim: Number(process.env.CARTO_FALLBACK_EMBED_DIM ?? 768) });
+  const workerCount = Math.max(1, CONCURRENCY);
+  const aiPassPool = Array.from({ length: workerCount }, () => createCapabilityAIPass());
+  type SummarizeChunkKind = Parameters<ReturnType<typeof createCapabilityAIPass>["summarize"]>[0]["chunkKind"];
+
+  type FallbackRow = { id: number; chunk_key: string; symbol_name: string | null; chunk_kind: string; code: string };
+  const allFallbacks = db.prepare(`
+    SELECT c.id, c.chunk_key, c.symbol_name, c.chunk_kind, c.code
+    FROM chunks c
+    WHERE c.capability_summary LIKE 'Fallback%'
+       OR c.capability_summary LIKE 'script anonymous%'
+       OR c.capability_summary = 'unknown'
+       OR c.capability_summary = ''
+  `).all() as FallbackRow[];
+
+  // Skip binary/non-text chunks before summary calls.
+  const fallbacks = allFallbacks.filter((c) => isLikelyTextChunk(c.code));
+  process.stderr.write(`[backfill] filtered ${allFallbacks.length - fallbacks.length} binary chunks\n`);
+
+  const total = fallbacks.length;
+  process.stderr.write(`[backfill] ${total} fallback chunks to process (concurrency=${CONCURRENCY})\n`);
+
+  if (total === 0) {
+    db.close();
+    console.log(JSON.stringify({ command: "backfill", upgraded: 0, finished_at: new Date().toISOString() }, null, 2));
+    return;
+  }
+
+  let upgraded = 0;
+  const started = new Date().toISOString();
+  const updateStmt = db.prepare(`UPDATE chunks SET capability_summary = ? WHERE id = ?`);
+
+  for (let i = 0; i < fallbacks.length; i += CONCURRENCY) {
+    const batch = fallbacks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((chunk, idx) =>
+        aiPassPool[idx % workerCount].summarize({
+          filePath: chunk.chunk_key,
+          symbolName: chunk.symbol_name,
+          chunkKind: chunk.chunk_kind as SummarizeChunkKind,
+          code: chunk.code,
+        }).then(summary => ({ id: chunk.id, summary }))
+      )
+    );
+    for (const { id, summary } of results) {
+      if (!summary || summary.startsWith("Fallback") || summary.includes("script anonymous")) continue;
+      updateStmt.run(summary, id);
+      upgraded++;
+    }
+    if ((i / CONCURRENCY) % 10 === 0) {
+      process.stderr.write(`[backfill] ${i + batch.length}/${total} | ${upgraded} upgraded\n`);
+    }
+  }
+
+  db.close();
+  process.stderr.write(`[backfill] done — ${upgraded}/${total} upgraded\n`);
+  console.log(JSON.stringify({ command: "backfill", upgraded, total, started_at: started, finished_at: new Date().toISOString() }, null, 2));
+}
+
 async function runIndex(args: string[]) {
   const dbPath = parseFlag(args, "--db") ?? DEFAULT_DB_PATH;
   const pathFlags = gatherFlagValues(args, "--path");
   const roots = (pathFlags.length > 0 ? pathFlags : DEFAULT_ALLOWLIST).map((p) => path.resolve(p));
   const maxFiles = Number.parseInt(parseFlag(args, "--max-files") ?? "200000", 10);
   const useAI = hasFlag(args, "--ai");
+  const CONCURRENCY = Number(process.env.CARTO_CONCURRENCY ?? 20);
 
   const db = initCartographerDb({ dbPath, embeddingDim: Number(process.env.CARTO_FALLBACK_EMBED_DIM ?? 768) });
   const aiPass = useAI ? createCapabilityAIPass() : undefined;
@@ -121,16 +202,23 @@ async function runIndex(args: string[]) {
     files.push(...walkFiles(root, maxFiles - files.length));
   }
 
+  process.stderr.write(`[index] ${files.length} files to process (concurrency=${CONCURRENCY})\n`);
+
   let chunksWritten = 0;
   let filesSeen = 0;
   const started = new Date().toISOString();
 
-  for (const file of files) {
-    filesSeen += 1;
-    const payload = await extractFilePayload(file, { allowlistRoots: roots, aiPass });
-    if (!payload) continue;
-    const out = upsertFilePayloadAtomic(db, payload);
-    chunksWritten += out.chunksWritten;
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const batch = files.slice(i, i + CONCURRENCY);
+    const payloads = await Promise.all(
+      batch.map(file => extractFilePayload(file, { allowlistRoots: roots, aiPass }))
+    );
+    for (const payload of payloads) {
+      filesSeen += 1;
+      if (!payload) continue;
+      const out = upsertFilePayloadAtomic(db, payload);
+      chunksWritten += out.chunksWritten;
+    }
   }
 
   db.close();
@@ -245,12 +333,17 @@ async function main() {
   const [, , cmd, ...rest] = process.argv;
 
   if (!cmd || cmd === "help" || cmd === "--help") {
-    console.log(`Usage:\n  cartographer-cli.ts index [--full|--incremental] [--path <root>]... [--max-files N] [--ai] [--db <path>]\n  cartographer-cli.ts promote <file-or-dir> --to Published|Capsules [--root <repo-root>] [--move]\n  cartographer-cli.ts stats [--db <path>]`);
+    console.log(`Usage:\n  cartographer-cli.ts index [--full|--incremental] [--path <root>]... [--max-files N] [--ai] [--db <path>]\n  cartographer-cli.ts backfill [--db <path>]   # upgrade fallback summaries without re-indexing\n  cartographer-cli.ts promote <file-or-dir> --to Published|Capsules [--root <repo-root>] [--move]\n  cartographer-cli.ts stats [--db <path>]`);
     return;
   }
 
   if (cmd === "index") {
     await runIndex(rest);
+    return;
+  }
+
+  if (cmd === "backfill") {
+    await runBackfill(rest);
     return;
   }
 

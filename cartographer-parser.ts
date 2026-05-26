@@ -404,7 +404,19 @@ export async function extractFilePayload(filePath: string, options: ParserOption
     return null;
   }
 
-  const source = fs.readFileSync(abs, "utf8");
+  const raw = fs.readFileSync(abs);
+  // Skip binary files — check first 512 bytes for non-printable chars
+  const sample = raw.slice(0, 512);
+  let nonPrintable = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const b = sample[i];
+    if (b !== undefined && b < 32 && b !== 9 && b !== 10 && b !== 13) nonPrintable++;
+  }
+  if (nonPrintable / sample.length > 0.05) return null;
+
+  const source = raw.toString("utf8");
+  if (!source.trim()) return null;  // skip empty files
+
   const stats = fs.statSync(abs);
   const language = detectLanguage(abs);
   let chunks: ExtractedChunk[] = [];
