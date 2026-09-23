@@ -39,7 +39,10 @@ export function initCartographerDb(opts: InitOptions): Database.Database {
         size_bytes INTEGER NOT NULL DEFAULT 0,
         content_hash TEXT NOT NULL,
         mtime_ms INTEGER NOT NULL,
-        indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_touched_at TEXT,
+        impressiveness_rank INTEGER NOT NULL DEFAULT 0,
+        fragment_tags TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE TABLE IF NOT EXISTS chunks (
@@ -63,7 +66,10 @@ export function initCartographerDb(opts: InitOptions): Database.Database {
         tests_passed INTEGER NOT NULL DEFAULT 0,
         last_test_pass_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_touched_at TEXT,
+        impressiveness_rank INTEGER NOT NULL DEFAULT 0,
+        fragment_tags TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
@@ -128,7 +134,18 @@ export function initCartographerDb(opts: InitOptions): Database.Database {
     // Backward-compatible schema migration for pre-role DBs.
     ensureColumn("chunks", "chunk_role", "chunk_role TEXT NOT NULL DEFAULT 'capability' CHECK (chunk_role IN ('capability','context'))");
     ensureColumn("chunks", "ai_pass_required", "ai_pass_required INTEGER NOT NULL DEFAULT 1 CHECK (ai_pass_required IN (0,1))");
+    
+    // Fragment migration
+    ensureColumn("files", "last_touched_at", "last_touched_at TEXT");
+    ensureColumn("files", "impressiveness_rank", "impressiveness_rank INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("files", "fragment_tags", "fragment_tags TEXT NOT NULL DEFAULT '[]'");
+    
+    ensureColumn("chunks", "last_touched_at", "last_touched_at TEXT");
+    ensureColumn("chunks", "impressiveness_rank", "impressiveness_rank INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("chunks", "fragment_tags", "fragment_tags TEXT NOT NULL DEFAULT '[]'");
+    
     db.exec("CREATE INDEX IF NOT EXISTS idx_chunks_role_ai ON chunks(chunk_role, ai_pass_required)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_chunks_impressiveness ON chunks(impressiveness_rank DESC)");
 
     // Shape-only nodes are context, not capability chunks for AI pass.
     db.exec(`

@@ -32,7 +32,7 @@ export function upsertFilePayloadAtomic(db: Database.Database, payload: Extracte
   `);
 
   const insertChunkStmt = db.prepare(`
-    INSERT INTO chunks (
+    INSERT OR IGNORE INTO chunks (
       file_id, chunk_key, symbol_name, chunk_kind,
       start_line, end_line, code, content_hash, chunk_bytes,
       capability_summary, capability_per_byte,
@@ -44,16 +44,17 @@ export function upsertFilePayloadAtomic(db: Database.Database, payload: Extracte
   `);
 
   const insertDepStmt = db.prepare(`
-    INSERT INTO deps (chunk_id, import_raw, dep_kind, normalized_target, created_at)
+    INSERT OR IGNORE INTO deps (chunk_id, import_raw, dep_kind, normalized_target, created_at)
     VALUES (?, ?, ?, ?, datetime('now'))
   `);
 
   const insertVecStmt = hasChunkIdCol
-    ? db.prepare("INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)")
-    : db.prepare("INSERT INTO chunk_vec(rowid, embedding) VALUES (?, ?)");
+    ? db.prepare("INSERT OR IGNORE INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)")
+    : db.prepare("INSERT OR IGNORE INTO chunk_vec(rowid, embedding) VALUES (?, ?)");
   const insertFtsStmt = db.prepare(
-    "INSERT INTO chunks_fts(rowid, chunk_key, capability_summary, symbol_name) VALUES (?, ?, ?, ?)"
+    "INSERT OR IGNORE INTO chunks_fts(rowid, chunk_key, capability_summary, symbol_name) VALUES (?, ?, ?, ?)"
   );
+  const deleteVecStmt = db.prepare("DELETE FROM chunk_vec WHERE rowid = ?");
 
   const tx = db.transaction((data: ExtractedFilePayload) => {
     deleteFileStmt.run(data.path);
@@ -96,16 +97,19 @@ export function upsertFilePayloadAtomic(db: Database.Database, payload: Extracte
 
       const chunkId = Number(chunkInsert.lastInsertRowid);
 
-      for (const dep of chunk.dependencies) {
-        insertDepStmt.run(chunkId, dep.import_raw, dep.dep_kind, dep.normalized_target);
-      }
+      if (chunkId > 0) {
+        for (const dep of chunk.dependencies) {
+          insertDepStmt.run(chunkId, dep.import_raw, dep.dep_kind, dep.normalized_target);
+        }
 
-      if (chunk.embedding) {
-        insertVecStmt.run(BigInt(chunkId), toEmbeddingBlob(chunk.embedding));
-      }
+        if (chunk.embedding) {
+          deleteVecStmt.run(BigInt(chunkId));
+          insertVecStmt.run(BigInt(chunkId), toEmbeddingBlob(chunk.embedding));
+        }
 
-      if (chunk.capability_summary) {
-        insertFtsStmt.run(chunkId, chunk.chunk_key, chunk.capability_summary, chunk.symbol_name);
+        if (chunk.capability_summary) {
+          insertFtsStmt.run(chunkId, chunk.chunk_key, chunk.capability_summary, chunk.symbol_name);
+        }
       }
     }
 
