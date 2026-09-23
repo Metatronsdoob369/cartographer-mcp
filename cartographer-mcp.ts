@@ -43,7 +43,7 @@ const DEFAULT_ALLOWLIST = (process.env.CARTO_ALLOWLIST_PATHS ??
   .map((p) => p.trim())
   .filter(Boolean);
 
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go"]);
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".md", ".txt", ".json", ".jsonl"]);
 
 const db = new Database(DEFAULT_DB_PATH);
 loadSqliteVec(db);
@@ -556,6 +556,203 @@ server.registerTool(
       return {
         isError: true,
         content: [{ type: "text", text: `reindex failed: ${(error as Error).message}` }],
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "rank_capability",
+  {
+    description: "Rank a capability chunk's impressiveness and assign fragment tags (e.g., 'not_opened_in_a_while') for the fragmentation tracking system.",
+    inputSchema: z.object({
+      chunk_key: z.string().min(1),
+      impressiveness_rank: z.number().int().min(0).max(10),
+      tags: z.array(z.string()).optional(),
+    }),
+  },
+  async ({ chunk_key, impressiveness_rank, tags }) => {
+    try {
+      const fragmentTags = tags ? JSON.stringify(tags) : '[]';
+      const result = db.prepare(
+        `UPDATE chunks
+         SET impressiveness_rank = ?,
+             fragment_tags = ?,
+             last_touched_at = datetime('now')
+         WHERE chunk_key = ?`
+      ).run(impressiveness_rank, fragmentTags, chunk_key);
+
+      if (result.changes === 0) {
+        throw new Error("chunk_key not found");
+      }
+
+      const output = {
+        chunk_key,
+        impressiveness_rank,
+        fragment_tags: tags ?? [],
+        updated: true,
+      };
+
+      return {
+        structuredContent: output,
+        content: [{ type: "text", text: JSON.stringify(output) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `rank_capability failed: ${(error as Error).message}` }],
+      };
+    }
+  }
+);
+
+server.registerTool(
+  "get_fragments",
+  {
+    description: "Retrieve highly-ranked, fragmented scaffolds that haven't been touched recently, ordered by impressiveness.",
+    inputSchema: z.object({
+      min_rank: z.number().int().min(0).default(1),
+      limit: z.number().int().min(1).max(50).default(10),
+    }),
+  },
+  async ({ min_rank, limit }) => {
+    try {
+      const rows = db.prepare(
+        `SELECT c.chunk_key, c.symbol_name, f.path AS file_path, c.chunk_kind, c.impressiveness_rank, c.fragment_tags, c.last_touched_at
+         FROM chunks c
+         JOIN files f ON f.id = c.file_id
+         WHERE c.impressiveness_rank >= ?
+         ORDER BY c.impressiveness_rank DESC, c.last_touched_at ASC
+         LIMIT ?`
+      ).all(min_rank, limit) as Array<{
+        chunk_key: string;
+        symbol_name: string | null;
+        file_path: string;
+        chunk_kind: string;
+        impressiveness_rank: number;
+        fragment_tags: string;
+        last_touched_at: string | null;
+      }>;
+
+      const results = rows.map(r => ({
+        ...r,
+        fragment_tags: safeJsonArray(r.fragment_tags),
+      }));
+
+      const output = {
+        result_count: results.length,
+        results,
+      };
+
+      return {
+        structuredContent: output,
+        content: [{ type: "text", text: JSON.stringify(output) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `get_fragments failed: ${(error as Error).message}` }],
+      };
+    }
+  }
+);
+
+const FIND_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "does", "exist", "existing", "already",
+  "have", "has", "any", "are", "how", "what", "where", "there", "use", "using", "our", "all",
+]);
+
+function findTerms(query: string): string[] {
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/)
+    .filter((t) => t.length >= 3 && !FIND_STOPWORDS.has(t));
+  return Array.from(new Set(terms)).slice(0, 8);
+}
+
+server.registerTool(
+  "find_existing",
+  {
+    description:
+      "Lexical 'does this already exist?' search — no embeddings or Ollama needed. Matches query terms against symbol names and summaries (FTS5) and file paths, and reports index coverage/freshness per root so a miss is never mistaken for absence. Use BEFORE proposing any new build.",
+    inputSchema: z.object({
+      query: z.string().min(1),
+      roots: z.array(z.string()).optional(),
+      limit: z.number().int().min(1).max(50).default(15),
+    }),
+  },
+  async ({ query, roots, limit }) => {
+    try {
+      const terms = findTerms(query);
+      if (terms.length === 0) {
+        throw new Error("query has no searchable terms (need words of 3+ chars)");
+      }
+
+      const rootPrefixes = (roots ?? []).map((r) => path.resolve(r));
+      const rootSql = rootPrefixes.length > 0 ? `AND (${rootPrefixes.map(() => "f.path LIKE ?").join(" OR ")})` : "";
+      const rootParams = rootPrefixes.map((r) => `${r}/%`);
+
+      const symbolHits = db
+        .prepare(
+          `SELECT c.chunk_key, c.symbol_name, f.path AS file_path, c.chunk_kind, c.start_line, c.end_line,
+                  c.capability_summary, bm25(chunks_fts) AS score
+           FROM chunks_fts
+           JOIN chunks c ON c.id = chunks_fts.rowid
+           JOIN files f ON f.id = c.file_id
+           WHERE chunks_fts MATCH ?
+           ${rootSql}
+           ORDER BY score
+           LIMIT ?`
+        )
+        .all(terms.map((t) => `"${t}"*`).join(" OR "), ...rootParams, limit);
+
+      const pathScore = terms.map(() => "(CASE WHEN lower(f.path) LIKE ? THEN 1 ELSE 0 END)").join(" + ");
+      const pathHits = db
+        .prepare(
+          `SELECT f.path AS file_path, f.repo_root, f.indexed_at, (${pathScore}) AS terms_matched
+           FROM files f
+           WHERE (${pathScore}) > 0
+           ${rootSql}
+           ORDER BY terms_matched DESC, length(f.path) ASC
+           LIMIT ?`
+        )
+        .all(...terms.map((t) => `%${t}%`), ...terms.map((t) => `%${t}%`), ...rootParams, limit);
+
+      const coverage =
+        rootPrefixes.length > 0
+          ? rootPrefixes.map((r) => {
+              const row = db
+                .prepare("SELECT count(*) AS files, max(indexed_at) AS last_indexed FROM files WHERE path LIKE ?")
+                .get(`${r}/%`) as { files: number; last_indexed: string | null };
+              return { root: r, files: row.files, last_indexed: row.last_indexed, indexed: row.files > 0 };
+            })
+          : db
+              .prepare(
+                "SELECT repo_root AS root, count(*) AS files, max(indexed_at) AS last_indexed FROM files GROUP BY repo_root ORDER BY files DESC"
+              )
+              .all();
+
+      const unindexed = rootPrefixes.filter((_, i) => !(coverage[i] as { indexed: boolean }).indexed);
+
+      const output = {
+        query,
+        terms,
+        symbol_hits: symbolHits,
+        path_hits: pathHits,
+        coverage,
+        unindexed_roots: unindexed,
+        note:
+          "A miss is NOT proof of absence. The index only covers the roots listed in coverage, as of last_indexed. Confirm with ripgrep on the live tree (including plugin/extension dirs) before reporting that something does not exist.",
+      };
+
+      return {
+        structuredContent: output,
+        content: [{ type: "text", text: JSON.stringify(output) }],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `find_existing failed: ${(error as Error).message}` }],
       };
     }
   }

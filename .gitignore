@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tgz
 mcp-publisher
+.DS_Store
+.tmp_repos/
